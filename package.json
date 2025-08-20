@@ -1,0 +1,31 @@
+{
+  "name": "email-validator-vercel",
+  "version": "1.0.0",
+  "description": "Email validation API deployed on Vercel",
+  "main": "api/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'No build step required for Vercel'",
+    "test": "echo 'No tests specified'"
+  },
+  "keywords": [
+    "email",
+    "validation",
+    "api",
+    "vercel",
+    "serverless",
+    "smtp",
+    "deliverability"
+  ],
+  "author": "Nibir Hossain",
+  "license": "MIT",
+  "dependencies": {
+    "deep-email-validator": "^0.1.21",
+    "psl": "^1.9.0",
+    "punycode": "^2.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
