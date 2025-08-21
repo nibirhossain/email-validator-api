@@ -8,7 +8,7 @@ import deep from "deep-email-validator";
 const VALIDATE_SMTP =
   (process.env.VALIDATE_SMTP || "true").toLowerCase() === "true";
 // Fixed: Use a valid domain - replace with your actual domain
-const SENDER = process.env.SMTP_SENDER || "noreply@storola.de";
+const SENDER = process.env.SMTP_SENDER || "no-reply@verifier.local";
 const MAX_CATCHALL_CHECK_MS = Number(process.env.CATCHALL_TIMEOUT_MS || 5000); // Reduced timeout
 const SMTP_TIMEOUT_MS = Number(process.env.SMTP_TIMEOUT_MS || 8000); // New SMTP timeout
 

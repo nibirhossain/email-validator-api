@@ -7,7 +7,7 @@
   },
   "env": {
     "VALIDATE_SMTP": "true",
-    "SMTP_SENDER": "noreply@storola.de",
+    "SMTP_SENDER": "no-reply@verifier.local",
     "CATCHALL_TIMEOUT_MS": "8000"
   },
   "headers": [
@@ -56,4 +56,3 @@
     }
   ]
 }
-
