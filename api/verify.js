@@ -8,7 +8,7 @@ import deep from "deep-email-validator";
 const VALIDATE_SMTP =
   (process.env.VALIDATE_SMTP || "true").toLowerCase() === "true";
 // Fixed: Use a valid domain - replace with your actual domain
-const SENDER = process.env.SMTP_SENDER || "no-reply@verifier.local";
+const SENDER = process.env.SMTP_SENDER || "noreply@storola.de";
 const MAX_CATCHALL_CHECK_MS = Number(process.env.CATCHALL_TIMEOUT_MS || 5000); // Reduced timeout
 const SMTP_TIMEOUT_MS = Number(process.env.SMTP_TIMEOUT_MS || 8000); // New SMTP timeout
 
@@ -80,11 +80,58 @@ const ROLE_LOCALS = new Set([
 ]);
 
 /** ---- Helpers ---- */
+
+// FIXED: Added proper email syntax validation
+function isValidEmailSyntax(email) {
+  // RFC 5322 compliant regex (simplified but robust)
+  const emailRegex =
+    /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+  if (!emailRegex.test(email)) {
+    return false;
+  }
+
+  const [local, domain] = email.split("@");
+
+  // Additional local part validation
+  if (
+    local.length > 64 ||
+    local.startsWith(".") ||
+    local.endsWith(".") ||
+    local.includes("..")
+  ) {
+    return false;
+  }
+
+  // Additional domain validation
+  if (
+    domain.length > 253 ||
+    domain.startsWith("-") ||
+    domain.endsWith("-") ||
+    domain.includes("..")
+  ) {
+    return false;
+  }
+
+  // Check for invalid characters that might slip through
+  const invalidChars = /[§+&\s]/;
+  if (invalidChars.test(email)) {
+    return false;
+  }
+
+  return true;
+}
+
 function normalizeEmail(raw) {
   if (typeof raw !== "string") return { normalized: null, error: "not_string" };
 
   const trimmed = raw.trim().normalize("NFC");
   if (trimmed.length > 320) return { normalized: null, error: "too_long" };
+
+  // FIXED: Early syntax validation to catch malformed emails
+  if (!isValidEmailSyntax(trimmed)) {
+    return { normalized: null, error: "invalid_syntax" };
+  }
 
   const at = trimmed.lastIndexOf("@");
   if (at === -1) return { normalized: null, error: "no_at" };
@@ -98,6 +145,12 @@ function normalizeEmail(raw) {
   if (local.length > 64) return { normalized: null, error: "local_too_long" };
   if (domain.length > 253)
     return { normalized: null, error: "domain_too_long" };
+
+  // FIXED: Additional validation for special characters in local part
+  const localInvalidChars = /[§+&\s]/;
+  if (localInvalidChars.test(local)) {
+    return { normalized: null, error: "invalid_local_chars" };
+  }
 
   try {
     domain = punycode.toASCII(domain);
@@ -133,8 +186,11 @@ function parseInboxHints(reason = "") {
   const is_disabled =
     /(mailbox.*disabled|inactive|deactivated|account.*disabled)/i.test(t);
   const user_unknown =
-    /(user unknown|mailbox unavailable|no such user|550 5\.1\.1)/i.test(t);
-  return { has_inbox_full, is_disabled, user_unknown };
+    /(user unknown|mailbox unavailable|no such user|550 5\.1\.1|recipient not found|does not exist|mailbox not found|not found)/i.test(
+      t
+    );
+  const temp_failure = /(timeout|connection|network|temporary)/i.test(t);
+  return { has_inbox_full, is_disabled, user_unknown, temp_failure };
 }
 
 // Fixed scoring algorithm - less harsh on SMTP failures
@@ -145,6 +201,7 @@ function computeScore(flags) {
   if (!flags.is_valid_syntax) score -= 50;
   if (!flags.mx_accepts_mail) score -= 40;
   if (flags.is_disabled) score -= 40;
+  if (flags.user_unknown) score -= 35;
   if (flags.has_inbox_full) score -= 30;
   if (flags.is_disposable) score -= 25;
 
@@ -155,14 +212,15 @@ function computeScore(flags) {
   // Minor issues (very small deductions)
   if (flags.is_free_email) score -= 2;
 
-  // Fixed: Don't penalize SMTP connection issues as heavily in serverless environments
-  // Only penalize if we know for sure the email is bad, not just unreachable
-  if (
-    !flags.is_deliverable &&
-    flags.smtp_checked &&
-    (flags.has_inbox_full || flags.is_disabled)
-  ) {
-    score -= 15; // Only penalize if we have concrete evidence of issues
+  // Fixed: Penalize undeliverable emails more appropriately
+  if (!flags.is_deliverable) {
+    if (flags.smtp_checked && (flags.has_inbox_full || flags.is_disabled)) {
+      score -= 25; // Concrete evidence of issues
+    } else if (flags.smtp_checked) {
+      score -= 15; // SMTP failed but unclear reason
+    } else {
+      score -= 10; // Could not verify deliverability
+    }
   }
 
   return Math.max(0, Math.min(100, score));
@@ -176,7 +234,12 @@ function deriveStatus(score, flags) {
   }
 
   // If we have concrete evidence of problems, it's bad
-  if (flags.is_disabled || flags.has_inbox_full || flags.is_disposable) {
+  if (
+    flags.is_disabled ||
+    flags.has_inbox_full ||
+    flags.is_disposable ||
+    flags.user_unknown
+  ) {
     return "bad";
   }
 
@@ -238,10 +301,10 @@ const validateEmail = async (email, options = {}) => {
   } catch (error) {
     console.error("Email validation error:", error.message);
 
-    // Return partial validation result when SMTP fails
+    // FIXED: Better fallback validation with proper syntax checking
     return {
       validators: {
-        regex: { valid: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) }, // Basic regex fallback
+        regex: { valid: isValidEmailSyntax(email) }, // Use our robust validation
         mx: { valid: false },
         smtp: { valid: false, reason: error.message },
       },
@@ -337,6 +400,7 @@ export default async function handler(req, res) {
         is_deliverable: false,
         is_disabled: false,
         is_free_email: null,
+        is_mailbox_found: false,
         checked_at: ts,
         normalized: null,
         input: email,
@@ -372,13 +436,12 @@ export default async function handler(req, res) {
       !smtpReason.includes("timeout") &&
       !smtpReason.includes("SMTP timeout");
 
-    const { has_inbox_full, is_disabled, user_unknown } =
+    const { has_inbox_full, is_disabled, user_unknown, temp_failure } =
       parseInboxHints(smtpReason);
 
-    // Fixed: More lenient deliverability check
-    // Don't mark as undeliverable just because SMTP failed - could be timeout/network issue
-    const is_deliverable =
-      smtpValid || (!smtp_checked && mx_accepts_mail && is_valid_syntax);
+    // Fixed: More strict deliverability check with user unknown detection
+    const is_deliverable = smtpValid && !user_unknown;
+    const is_mailbox_found = !user_unknown && smtp_checked;
 
     let is_catch_all = false;
     if (mx_accepts_mail && VALIDATE_SMTP && !smtpReason.includes("timeout")) {
@@ -403,6 +466,8 @@ export default async function handler(req, res) {
       is_disabled,
       is_free_email,
       smtp_checked, // Added flag to track if SMTP was actually checked
+      user_unknown, // Added user unknown detection
+      is_mailbox_found, // Added mailbox found detection
     };
 
     const overall_score = computeScore(flags);
@@ -424,6 +489,7 @@ export default async function handler(req, res) {
       is_deliverable,
       is_disabled,
       is_free_email,
+      is_mailbox_found,
       checked_at: ts,
       normalized,
       input: email,

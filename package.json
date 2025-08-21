@@ -2,7 +2,7 @@
   "name": "email-validator-vercel",
   "version": "1.0.0",
   "description": "Email validation API deployed on Vercel",
-  "main": "api/index.js",
+  "main": "server.js",
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
@@ -22,6 +22,7 @@
   "license": "MIT",
   "dependencies": {
     "deep-email-validator": "^0.1.21",
+    "express": "^5.1.0",
     "psl": "^1.9.0",
     "punycode": "^2.3.1"
   },
