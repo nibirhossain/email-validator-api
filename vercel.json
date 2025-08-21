@@ -1,11 +1,5 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
-    }
-  ],
   "functions": {
     "api/**/*.js": {
       "maxDuration": 30
@@ -13,7 +7,7 @@
   },
   "env": {
     "VALIDATE_SMTP": "true",
-    "SMTP_SENDER": "no-reply@verifier.local",
+    "SMTP_SENDER": "noreply@storola.de",
     "CATCHALL_TIMEOUT_MS": "8000"
   },
   "headers": [
@@ -62,3 +56,4 @@
     }
   ]
 }
+
