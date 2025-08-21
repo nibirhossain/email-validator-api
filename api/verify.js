@@ -7,8 +7,10 @@ import deep from "deep-email-validator";
 /** ---- Config ---- */
 const VALIDATE_SMTP =
   (process.env.VALIDATE_SMTP || "true").toLowerCase() === "true";
-const SENDER = process.env.SMTP_SENDER || "no-reply@verifier.local";
-const MAX_CATCHALL_CHECK_MS = Number(process.env.CATCHALL_TIMEOUT_MS || 8000);
+// Fixed: Use a valid domain - replace with your actual domain
+const SENDER = process.env.SMTP_SENDER || "noreply@storola.de";
+const MAX_CATCHALL_CHECK_MS = Number(process.env.CATCHALL_TIMEOUT_MS || 5000); // Reduced timeout
+const SMTP_TIMEOUT_MS = Number(process.env.SMTP_TIMEOUT_MS || 8000); // New SMTP timeout
 
 // Enhanced free providers list
 const FREE_PROVIDERS = new Set([
@@ -135,34 +137,67 @@ function parseInboxHints(reason = "") {
   return { has_inbox_full, is_disabled, user_unknown };
 }
 
+// Fixed scoring algorithm - less harsh on SMTP failures
 function computeScore(flags) {
   let score = 100;
-  if (!flags.is_valid_syntax) score -= 40;
-  if (!flags.mx_accepts_mail) score -= 35;
-  if (!flags.can_connect_smtp) score -= 10;
-  if (flags.is_disposable) score -= 30;
-  if (flags.is_role_account) score -= 10;
+
+  // Critical issues (major deductions)
+  if (!flags.is_valid_syntax) score -= 50;
+  if (!flags.mx_accepts_mail) score -= 40;
+  if (flags.is_disabled) score -= 40;
+  if (flags.has_inbox_full) score -= 30;
+  if (flags.is_disposable) score -= 25;
+
+  // Moderate issues (smaller deductions)
+  if (flags.is_role_account) score -= 15;
   if (flags.is_catch_all) score -= 10;
-  if (flags.has_inbox_full) score -= 20;
-  if (flags.is_disabled) score -= 30;
-  if (!flags.is_deliverable) score -= 35;
-  if (flags.is_free_email) score -= 5;
+
+  // Minor issues (very small deductions)
+  if (flags.is_free_email) score -= 2;
+
+  // Fixed: Don't penalize SMTP connection issues as heavily in serverless environments
+  // Only penalize if we know for sure the email is bad, not just unreachable
+  if (
+    !flags.is_deliverable &&
+    flags.smtp_checked &&
+    (flags.has_inbox_full || flags.is_disabled)
+  ) {
+    score -= 15; // Only penalize if we have concrete evidence of issues
+  }
+
   return Math.max(0, Math.min(100, score));
 }
 
-function deriveStatus(score, f) {
+// Fixed status derivation - more lenient for production environments
+function deriveStatus(score, flags) {
+  // If basic validation fails, it's definitely bad
+  if (!flags.is_valid_syntax || !flags.mx_accepts_mail) {
+    return "bad";
+  }
+
+  // If we have concrete evidence of problems, it's bad
+  if (flags.is_disabled || flags.has_inbox_full || flags.is_disposable) {
+    return "bad";
+  }
+
+  // Safe: Good syntax, valid MX, no concrete issues
   if (
-    score >= 90 &&
-    f.is_valid_syntax &&
-    f.mx_accepts_mail &&
-    f.is_deliverable &&
-    !f.is_disposable &&
-    !f.is_catch_all &&
-    !f.is_disabled &&
-    !f.has_inbox_full
-  )
+    score >= 75 &&
+    flags.is_valid_syntax &&
+    flags.mx_accepts_mail &&
+    !flags.is_disabled &&
+    !flags.has_inbox_full &&
+    !flags.is_disposable
+  ) {
     return "safe";
-  if (score >= 60) return "risky";
+  }
+
+  // Risky: Medium score but no critical issues
+  if (score >= 50) {
+    return "risky";
+  }
+
+  // Bad: Low score or critical issues
   return "bad";
 }
 
@@ -177,34 +212,50 @@ async function listMx(domain) {
 }
 
 const validator = deep?.default ?? deep;
+
+// Fixed email validation with better error handling and timeouts
 const validateEmail = async (email, options = {}) => {
   try {
     if (validator && typeof validator.validate === "function") {
-      return await validator.validate(email, options);
+      return await Promise.race([
+        validator.validate(email, options),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("SMTP timeout")), SMTP_TIMEOUT_MS)
+        ),
+      ]);
     }
     if (typeof validator === "function") {
-      return await validator(email, options);
+      return await Promise.race([
+        validator(email, options),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("SMTP timeout")), SMTP_TIMEOUT_MS)
+        ),
+      ]);
     }
     throw new Error(
       "deep-email-validator: validate() not found on module export"
     );
   } catch (error) {
     console.error("Email validation error:", error.message);
+
+    // Return partial validation result when SMTP fails
     return {
       validators: {
-        regex: { valid: false },
+        regex: { valid: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) }, // Basic regex fallback
         mx: { valid: false },
-        smtp: { valid: false, reason: "validation_service_error" },
+        smtp: { valid: false, reason: error.message },
       },
+      reason: error.message,
     };
   }
 };
 
 async function runValidation(email) {
+  // Fixed: Better validation options for production
   return await validateEmail(email, {
     sender: SENDER,
     validateRegex: true,
-    validateTypo: true,
+    validateTypo: false, // Disable to reduce timeout issues
     validateDisposable: true,
     validateMx: true,
     validateSMTP: VALIDATE_SMTP,
@@ -297,12 +348,12 @@ export default async function handler(req, res) {
     const is_role_account = isRole(local);
     const is_free_email = isFreeDomain(registrable);
 
-    // Run validation with timeout
+    // Fixed: Reduced timeout for Vercel serverless
     const result = await Promise.race([
       runValidation(normalized),
       new Promise(
         (_, reject) =>
-          setTimeout(() => reject(new Error("Validation timeout")), 25000) // 25s for Vercel
+          setTimeout(() => reject(new Error("Validation timeout")), 20000) // Reduced to 20s
       ),
     ]);
 
@@ -314,18 +365,23 @@ export default async function handler(req, res) {
     const smtpReason = v.smtp?.reason || result?.reason || "";
     const is_disposable = v.disposable?.valid === false;
 
+    // Fixed: Better SMTP connection detection
+    const smtp_checked = VALIDATE_SMTP && typeof v.smtp?.reason !== "undefined";
     const can_connect_smtp =
-      VALIDATE_SMTP &&
-      mx_accepts_mail &&
-      (v.smtp?.valid === true || typeof v.smtp?.reason !== "undefined");
+      smtp_checked &&
+      !smtpReason.includes("timeout") &&
+      !smtpReason.includes("SMTP timeout");
 
     const { has_inbox_full, is_disabled, user_unknown } =
       parseInboxHints(smtpReason);
+
+    // Fixed: More lenient deliverability check
+    // Don't mark as undeliverable just because SMTP failed - could be timeout/network issue
     const is_deliverable =
-      smtpValid && !has_inbox_full && !is_disabled && !user_unknown;
+      smtpValid || (!smtp_checked && mx_accepts_mail && is_valid_syntax);
 
     let is_catch_all = false;
-    if (mx_accepts_mail && VALIDATE_SMTP) {
+    if (mx_accepts_mail && VALIDATE_SMTP && !smtpReason.includes("timeout")) {
       try {
         is_catch_all = await detectCatchAll(domain);
       } catch {
@@ -346,6 +402,7 @@ export default async function handler(req, res) {
       is_deliverable,
       is_disabled,
       is_free_email,
+      smtp_checked, // Added flag to track if SMTP was actually checked
     };
 
     const overall_score = computeScore(flags);
@@ -370,6 +427,7 @@ export default async function handler(req, res) {
       checked_at: ts,
       normalized,
       input: email,
+      smtp_reason: smtpReason, // Added for debugging
     });
   } catch (error) {
     console.error("Validation error:", error);
